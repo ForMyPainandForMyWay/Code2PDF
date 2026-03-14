@@ -1,0 +1,10 @@
+[project]
+name = "pythonproject"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.13"
+dependencies = [
+    "pathspec>=0.12",
+    "pygments>=2.18",
+    "reportlab>=4.1",
+]
