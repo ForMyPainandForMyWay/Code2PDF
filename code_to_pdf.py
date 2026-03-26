@@ -292,7 +292,7 @@ def measure_pages_for_file(
 
 
 def measure_toc_pages(
-    entries: list[tuple[str, int]],
+    entries: list[dict],
     page_width: float,
     page_height: float,
     margin_left: float,
@@ -303,16 +303,16 @@ def measure_toc_pages(
     font_size: int,
 ) -> int:
     line_height = font_size * 1.4
-    usable_height = page_height - margin_top - margin_bottom - (line_height * 1.5)  # minus title
+    usable_height = page_height - margin_top - margin_bottom - (line_height * 1.5)  # title + gap
     lines_per_page = max(1, int(usable_height // line_height))
-    total_lines = 1 + len(entries)  # title + entries
+    total_lines = 1 + sum(1 if not e.get("is_header") else 1 for e in entries)
     pages = (total_lines + lines_per_page - 1) // lines_per_page
     return pages
 
 
 def draw_toc(
     canv: canvas.Canvas,
-    entries: list[tuple[str, int]],
+    entries: list[dict],
     page_width: float,
     page_height: float,
     margin_left: float,
@@ -322,8 +322,9 @@ def draw_toc(
     font_ascii: str,
     font_cjk: str,
     font_size: int,
-    global_page_start: int,
-    global_total_pages: int,
+    columns: int = 1,
+    global_page_start: int = 1,
+    global_total_pages: int = 1,
 ) -> int:
     line_height = font_size * 1.4
     y = page_height - margin_top - (line_height * 0.5)
@@ -345,29 +346,105 @@ def draw_toc(
     canv.setFont(font_ascii, font_size)
     page_idx = global_page_start
 
-    for name, start_page in entries:
+    first_entry = True
+    for entry in entries:
+        name = entry["label"]
+        start_page = entry["page"]
+        dest = entry.get("dest")
+        toc_dest = entry.get("toc_dest")
+        is_header = entry.get("is_header", False)
         if y < margin_bottom + line_height:
             canv.showPage()
             page_idx += 1
-            y = page_height - margin_top - (line_height * 0.5)
             canv.setFont(font_cjk, font_size + 4)
             canv.setFillColor(colors.darkblue)
+            y = page_height - margin_top - (line_height * 0.5)
             canv.drawString(margin_left, y, "目录")
             draw_footer(page_idx)
             y -= line_height * 1.5
             canv.setFont(font_ascii, font_size)
 
+        if is_header and not first_entry:
+            y -= line_height * 0.4  # extra gap before a new group header
+
         canv.setFillColor(colors.black)
-        # Use CJK font to safely render mixed names.
-        canv.setFont(font_cjk, font_size)
+        canv.setFont(font_cjk if not is_header else font_cjk, font_size + (2 if is_header else 0))
         canv.drawString(margin_left, y, name)
-        pg_text = str(start_page)
-        pg_width = pdfmetrics.stringWidth(pg_text, font_ascii, font_size)
-        canv.setFont(font_ascii, font_size)
-        canv.drawString(page_width - margin_right - pg_width, y, pg_text)
-        y -= line_height
+        if not is_header:
+            # Bookmark for linking back from file header to this entry
+            if toc_dest:
+                canv.bookmarkHorizontal(toc_dest, margin_left, y)
+            pg_text = str(start_page)
+            pg_width = pdfmetrics.stringWidth(pg_text, font_ascii, font_size)
+            canv.setFont(font_ascii, font_size)
+            canv.drawString(page_width - margin_right - pg_width, y, pg_text)
+            # Clickable area for hyperlink.
+            name_width = pdfmetrics.stringWidth(name, font_cjk, font_size)
+            canv.linkAbsolute(
+                "",
+                dest,
+                Rect=(
+                    margin_left,
+                    y - line_height * 0.2,
+                    margin_left + name_width,
+                y + line_height * 0.8,
+                ),
+                thickness=0,
+            )
+        y -= line_height * (1.4 if is_header else 1.0)
+        first_entry = False
 
     return page_idx - global_page_start + 1
+
+
+def build_toc_entries(
+    files: list[Path],
+    project_dir: Path,
+    dest_names: list[str],
+    toc_dest_names: list[str],
+    start_pages: list[int],
+    mode: str = "auto",
+) -> list[dict]:
+    rels = [f.relative_to(project_dir) for f in files]
+    depths = [len(p.parts) for p in rels]
+    avg_depth = sum(depths) / len(depths) if depths else 0
+
+    if mode == "auto":
+        mode = "grouped" if len(files) > 120 or avg_depth > 3 else "flat"
+
+    entries: list[dict] = []
+    if mode == "grouped":
+        groups: dict[str, list[tuple[str, int]]] = {}
+        for idx, rel in enumerate(rels):
+            parts = rel.parts
+            group = parts[0] if len(parts) > 1 else "(root)"
+            tail = "/".join(parts[1:]) if len(parts) > 1 else parts[0]
+            groups.setdefault(group, []).append((tail, idx))
+        for group in sorted(groups.keys()):
+            first_idx = groups[group][0][1]
+            entries.append({"label": group, "page": start_pages[first_idx], "is_header": True})
+            for tail, idx in sorted(groups[group], key=lambda t: t[0]):
+                entries.append(
+                    {
+                        "label": tail,
+                        "page": start_pages[idx],
+                        "dest": dest_names[idx],
+                        "toc_dest": toc_dest_names[idx],
+                        "is_header": False,
+                    }
+                )
+    else:  # flat
+        for idx, rel in enumerate(rels):
+            entries.append(
+                {
+                    "label": rel.as_posix(),
+                    "page": start_pages[idx],
+                    "dest": dest_names[idx],
+                    "toc_dest": toc_dest_names[idx],
+                    "is_header": False,
+                }
+            )
+    return entries
 
 
 def draw_highlighted_file(
@@ -377,7 +454,7 @@ def draw_highlighted_file(
     rel_path: Path,
     page_width: float,
     page_height: float,
-    margin_left: float = 15.0,
+    margin_left: float = 36.0,
     margin_right: float = 20.0,
     margin_top: float = 36.0,
     margin_bottom: float = 36.0,
@@ -388,6 +465,8 @@ def draw_highlighted_file(
     file_page_total: int = 1,
     global_page_start: int = 1,
     global_total_pages: int = 1,
+    dest_name: Optional[str] = None,
+    toc_link: Optional[str] = None,
 ):
     """Render one file on the current page of the canvas.
 
@@ -413,12 +492,43 @@ def draw_highlighted_file(
     page_num_font_size = font_size + 3
     file_page_idx = 1
     global_page = global_page_start
+    toc_dest_name = toc_link or f"toc_{rel_path.as_posix().replace('/', '_')}"
 
     def draw_header():
         # left: header text; right: page number
         canv.setFont(font_ascii, header_font_size)
         canv.setFillColor(colors.darkblue)
-        canv.drawString(margin_left, page_height - margin_top, header_text_current)
+        header_y = page_height - margin_top
+        canv.drawString(margin_left, header_y, header_text_current)
+        header_width = pdfmetrics.stringWidth(header_text_current, font_ascii, header_font_size)
+        # Clickable header link target differs for first vs. subsequent pages
+        if file_page_idx == 1:
+            # link back to TOC entry
+            canv.linkAbsolute(
+                "",
+                toc_dest_name,
+                Rect=(
+                    margin_left,
+                    header_y - header_font_size * 0.2,
+                    margin_left + header_width,
+                    header_y + header_font_size * 0.8,
+                ),
+                thickness=0,
+            )
+        else:
+            # link to file first page bookmark
+            if dest_name:
+                canv.linkAbsolute(
+                    "",
+                    dest_name,
+                    Rect=(
+                        margin_left,
+                        header_y - header_font_size * 0.2,
+                        margin_left + header_width,
+                        header_y + header_font_size * 0.8,
+                    ),
+                    thickness=0,
+                )
 
         pg_text = f"{file_page_idx}/{file_page_total}"
         canv.setFont(font_ascii, page_num_font_size)
@@ -437,6 +547,8 @@ def draw_highlighted_file(
 
     y = page_height - margin_top - (line_height * 1.5)
     draw_header()
+    if dest_name:
+        canv.bookmarkPage(dest_name)
 
     lexer = get_lexer_for_filename(file_path.name, stripall=False)
     line_no = 1
@@ -522,6 +634,7 @@ def build_pdf(
     cjk_font_file: Optional[Path] = None,
     split_files: bool = False,
     extra_excludes: Optional[set[str]] = None,
+    toc_mode: str = "auto",
 ) -> Path:
     files = filter_code_files(load_gitignored_files(project_dir, extra_excludes), project_dir)
     if not files:
@@ -540,7 +653,12 @@ def build_pdf(
     style = get_style_by_name(STYLE_NAME)
 
     file_page_counts = []
+    dest_names = []
+    toc_dest_names = []
     for fp in files:
+        rel = fp.relative_to(project_dir)
+        dest_names.append(f"dest_{rel.as_posix().replace('/', '_')}")
+        toc_dest_names.append(f"toc_{rel.as_posix().replace('/', '_')}")
         file_page_counts.append(
             measure_pages_for_file(
                 fp,
@@ -555,8 +673,16 @@ def build_pdf(
                 9,
             )
         )
+    temp_entries = build_toc_entries(
+        files,
+        project_dir,
+        dest_names,
+        toc_dest_names,
+        [0] * len(files),
+        mode=toc_mode,
+    )
     toc_pages = measure_toc_pages(
-        [(str(f.relative_to(project_dir)), 0) for f in files],
+        temp_entries,
         page_width,
         page_height,
         36.0,
@@ -576,9 +702,17 @@ def build_pdf(
         cursor += count
 
     # Render TOC
+    toc_entries = build_toc_entries(
+        files,
+        project_dir,
+        dest_names,
+        toc_dest_names,
+        start_pages,
+        mode=toc_mode,
+    )
     draw_toc(
         canv,
-        [(str(f.relative_to(project_dir)), start_pages[idx]) for idx, f in enumerate(files)],
+        toc_entries,
         page_width,
         page_height,
         36.0,
@@ -612,6 +746,8 @@ def build_pdf(
             file_page_total=file_page_counts[idx],
             global_page_start=global_page_start,
             global_total_pages=total_pages,
+            dest_name=dest_names[idx],
+            toc_link=toc_dest_names[idx],
         )
         global_page_start += file_page_counts[idx]
         if split_files:
@@ -633,6 +769,8 @@ def build_pdf(
                 file_page_total=file_page_counts[idx],
                 global_page_start=1,
                 global_total_pages=file_page_counts[idx],
+                dest_name=dest_names[idx],
+                toc_link=None,
             )
             single_canvas.save()
 
@@ -665,6 +803,12 @@ def parse_args():
         default=[],
         help="Extra directories (relative to project_dir) to exclude in addition to .gitignore. Can be used multiple times.",
     )
+    parser.add_argument(
+        "--toc-mode",
+        choices=["auto", "flat", "grouped"],
+        default="auto",
+        help="TOC layout: auto (default), flat list, or grouped by top-level directory.",
+    )
     return parser.parse_args()
 
 
@@ -685,6 +829,7 @@ def main():
         cjk_font_file=cjk_font_file,
         split_files=args.split_files,
         extra_excludes=set(args.exclude_dir),
+        toc_mode=args.toc_mode,
     )
     print(f"PDF written to: {pdf_path}")
 
