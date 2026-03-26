@@ -4,12 +4,15 @@
 
 Code to PDF 是一个用于生成代码文件的语法高亮 PDF 文档的 Python 脚本。它可以扫描项目目录中的代码文件，生成带有语法高亮、目录和页码的 PDF 文档，方便代码审查、归档和分享。
 
-本项目由CodeX在GPT-5.1-CodeX-Max辅助下构建
+本项目由 CodeX 在 GPT-5.1-CodeX-Max 辅助下构建。
+
 ## 功能特性
 
 - 支持多种编程语言的语法高亮（Python、C/C++、CUDA 等）
 - 自动尊重 .gitignore 文件的过滤规则
 - 生成带有目录的 PDF 文档
+- 支持目录分组显示（按顶层目录分组或平铺列表）
+- PDF 内支持超链接导航（点击目录跳转到文件，点击文件头跳转回目录）
 - 支持中文字体，避免中文显示问题
 - 可选择生成单个文件的 PDF 文档
 - 自动处理页面布局和分页
@@ -30,12 +33,6 @@ Code to PDF 是一个用于生成代码文件的语法高亮 PDF 文档的 Pytho
 使用 pip 安装依赖：
 
 ```bash
-pip install -r requirements.txt
-```
-
-或者直接安装：
-
-```bash
 pip install pathspec>=0.12 pygments>=2.18 reportlab>=4.1
 ```
 
@@ -53,6 +50,10 @@ python code_to_pdf.py <project_dir> <output_dir>
 - `--cjk-font /path/to/font.(ttf|ttc)` - 可选的仅用于 CJK 字符的字体
 - `--split-files` - 同时为每个代码文件生成单独的 PDF 文档
 - `--exclude-dir` - 额外排除的目录（相对于项目目录），可多次使用，可用于排除三方库
+- `--toc-mode {auto,flat,grouped}` - 目录布局模式：
+  - `auto`（默认）- 自动选择，当文件数超过 120 或平均深度超过 3 时使用分组模式
+  - `flat` - 平铺列表，所有文件按路径排序显示
+  - `grouped` - 按顶层目录分组显示
 
 ### 示例
 
@@ -72,6 +73,10 @@ python code_to_pdf.py <project_dir> <output_dir>
    ```bash
    python code_to_pdf.py /path/to/project /path/to/output --exclude-dir build --exclude-dir __pycache__
    ```
+5. 使用分组目录模式：
+   ```bash
+   python code_to_pdf.py /path/to/project /path/to/output --toc-mode grouped
+   ```
 
 ## 代码结构
 
@@ -86,11 +91,12 @@ python code_to_pdf.py <project_dir> <output_dir>
 7. `split_font_runs()` - 分割字体运行
 8. `measure_pages_for_file()` - 估计文件需要的页数
 9. `measure_toc_pages()` - 估计目录需要的页数
-10. `draw_toc()` - 绘制目录
-11. `draw_highlighted_file()` - 绘制高亮显示的文件
-12. `build_pdf()` - 构建 PDF 文档
-13. `parse_args()` - 解析命令行参数
-14. `main()` - 主函数
+10. `draw_toc()` - 绘制目录（支持超链接和分组显示）
+11. `build_toc_entries()` - 构建目录条目（支持 flat 和 grouped 两种模式）
+12. `draw_highlighted_file()` - 绘制高亮显示的文件（支持超链接导航）
+13. `build_pdf()` - 构建 PDF 文档
+14. `parse_args()` - 解析命令行参数
+15. `main()` - 主函数
 
 ## 支持的文件类型
 
@@ -133,6 +139,14 @@ python code_to_pdf.py <project_dir> <output_dir>
 
 - 主 PDF 文件：`<output_dir>/<project_name>.pdf`
 - 如果使用 `--split-files` 选项，单独的 PDF 文件将保存在 `<output_dir>/files/` 目录中
+
+## PDF 导航功能
+
+生成的 PDF 支持交互式导航：
+
+- **目录导航**：点击目录中的文件名，可直接跳转到对应的代码文件
+- **返回目录**：点击文件头部的路径，可返回目录页面
+- **页码显示**：每页底部显示全局页码（如 5/100）
 
 ## 注意事项
 
