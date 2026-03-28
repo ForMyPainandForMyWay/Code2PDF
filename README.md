@@ -8,7 +8,7 @@ Code to PDF 是一个用于生成代码文件的语法高亮 PDF 文档的 Pytho
 
 ## 功能特性
 
-- 支持多种编程语言的语法高亮（Python、C/C++、CUDA 等）
+- 支持多种编程语言的语法高亮（Python、C/C++、CUDA、HTML、CSS、JavaScript、Shell、CMake、Make 等）
 - 自动尊重 .gitignore 文件的过滤规则
 - 生成带有目录的 PDF 文档
 - 支持目录分组显示（按顶层目录分组或平铺列表）
@@ -17,6 +17,9 @@ Code to PDF 是一个用于生成代码文件的语法高亮 PDF 文档的 Pytho
 - 可选择生成单个文件的 PDF 文档
 - 自动处理页面布局和分页
 - 显示行号，方便代码引用
+- 生成代码统计信息（文件数、代码行数、注释行数、空白行数）
+- 支持并行处理，提高生成速度
+- 优化的字体处理，支持混合字体渲染
 
 ## 安装
 
@@ -41,7 +44,7 @@ pip install pathspec>=0.12 pygments>=2.18 reportlab>=4.1
 ### 基本用法
 
 ```bash
-python code_to_pdf.py <project_dir> <output_dir>
+python3 code_to_pdf.py <project_dir> <output_dir>
 ```
 
 ### 可选参数
@@ -54,49 +57,38 @@ python code_to_pdf.py <project_dir> <output_dir>
   - `auto`（默认）- 自动选择，当文件数超过 120 或平均深度超过 3 时使用分组模式
   - `flat` - 平铺列表，所有文件按路径排序显示
   - `grouped` - 按顶层目录分组显示
+- `--workers N` - 并行处理的工作线程数（0 = 自动，默认）
 
 ### 示例
 
 1. 基本用法：
    ```bash
-   python code_to_pdf.py /path/to/project /path/to/output
+   python3 code_to_pdf.py /path/to/project /path/to/output
    ```
 2. 使用自定义字体：
    ```bash
-   python code_to_pdf.py /path/to/project /path/to/output --font /path/to/font.ttf
+   python3 code_to_pdf.py /path/to/project /path/to/output --font /path/to/font.ttf
    ```
 3. 生成单独的 PDF 文件：
    ```bash
-   python code_to_pdf.py /path/to/project /path/to/output --split-files
+   python3 code_to_pdf.py /path/to/project /path/to/output --split-files
    ```
 4. 排除特定目录：
    ```bash
-   python code_to_pdf.py /path/to/project /path/to/output --exclude-dir build --exclude-dir __pycache__
+   python3 code_to_pdf.py /path/to/project /path/to/output --exclude-dir build --exclude-dir __pycache__
    ```
 5. 使用分组目录模式：
    ```bash
-   python code_to_pdf.py /path/to/project /path/to/output --toc-mode grouped
+   python3 code_to_pdf.py /path/to/project /path/to/output --toc-mode grouped
+   ```
+6. 使用并行处理：
+   ```bash
+   python3 code_to_pdf.py /path/to/project /path/to/output --workers 4
    ```
 
 ## 代码结构
 
-项目主要由一个 Python 文件 `code_to_pdf.py` 组成，包含以下主要函数：
-
-1. `load_gitignored_files()` - 加载并解析 .gitignore 文件，返回未被忽略的文件列表
-2. `filter_code_files()` - 过滤出代码文件，并按路径排序
-3. `register_font()` - 注册字体
-4. `pick_font()` - 选择合适的字体
-5. `token_color()` - 将 Pygments 令牌转换为 ReportLab 颜色
-6. `is_cjk()` - 判断字符是否为 CJK 字符
-7. `split_font_runs()` - 分割字体运行
-8. `measure_pages_for_file()` - 估计文件需要的页数
-9. `measure_toc_pages()` - 估计目录需要的页数
-10. `draw_toc()` - 绘制目录（支持超链接和分组显示）
-11. `build_toc_entries()` - 构建目录条目（支持 flat 和 grouped 两种模式）
-12. `draw_highlighted_file()` - 绘制高亮显示的文件（支持超链接导航）
-13. `build_pdf()` - 构建 PDF 文档
-14. `parse_args()` - 解析命令行参数
-15. `main()` - 主函数
+项目主要由一个 Python 文件 `code_to_pdf.py` 组成，包含实现代码文件扫描、语法高亮、PDF 生成等功能的核心函数。
 
 ## 支持的文件类型
 
@@ -112,6 +104,11 @@ python code_to_pdf.py <project_dir> <output_dir>
 - `.js` - JavaScript
 - `.jsx` - JSX
 - `.css` - CSS
+- `.cmake` - CMake
+- `.mk` - Makefile
+- `.sh` - Shell
+- `CMakeLists.txt` - CMake
+- `Makefile` - Makefile
 
 ## 字体处理
 
@@ -147,6 +144,18 @@ python code_to_pdf.py <project_dir> <output_dir>
 - **目录导航**：点击目录中的文件名，可直接跳转到对应的代码文件
 - **返回目录**：点击文件头部的路径，可返回目录页面
 - **页码显示**：每页底部显示全局页码（如 5/100）
+
+## 代码统计功能
+
+生成的 PDF 包含代码统计信息页面，显示以下内容：
+
+- 每种语言的文件数
+- 每种语言的空白行数
+- 每种语言的注释行数
+- 每种语言的代码行数
+- 总计统计信息
+
+统计信息使用表格形式展示，位于 PDF 文档的开头。
 
 ## 注意事项
 

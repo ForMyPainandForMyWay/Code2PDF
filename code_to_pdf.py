@@ -14,8 +14,11 @@ from __future__ import annotations
 import argparse
 import os
 import subprocess
+from collections import defaultdict
 from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 
 from pathspec import PathSpec
 from pathspec.patterns.gitwildmatch import GitWildMatchPattern
@@ -45,7 +48,36 @@ CODE_EXTS = {
     ".js",
     ".jsx",
     ".css",
+    ".cmake",
+    ".mk",
+    ".sh",
 }
+
+# Language mapping for stats
+LANGUAGE_MAP = {
+    ".py": "Python",
+    ".c": "C",
+    ".cc": "C++",
+    ".cpp": "C++",
+    ".cxx": "C++",
+    ".cu": "CUDA",
+    ".qml": "QML",
+    ".html": "HTML",
+    ".htm": "HTML",
+    ".js": "JavaScript",
+    ".jsx": "JavaScript",
+    ".css": "CSS",
+    ".sh": "Shell",
+    "Makefile": "Make",
+    ".mk": "Make",
+    "CMakeLists.txt": "CMake",
+    ".cmake": "CMake",
+}
+
+HEADER_EXTS = {".h", ".hpp", ".hh", ".hxx", ".cuh"}
+
+# Filenames without extension that should be treated as code
+CODE_NAMES = {"CMakeLists.txt", "Makefile"}
 
 # Light-friendly palette so normal text is readable on white background.
 STYLE_NAME = "friendly"
@@ -135,7 +167,12 @@ def load_gitignored_files(project_dir: Path, extra_excludes: Optional[set[str]] 
 
 def filter_code_files(files: Iterable[Path], base: Path) -> List[Path]:
     return sorted(
-        [f for f in files if f.suffix.lower() in CODE_EXTS and f.is_file()],
+        [
+            f
+            for f in files
+            if f.is_file()
+            and (f.suffix.lower() in CODE_EXTS or f.name in CODE_NAMES)
+        ],
         key=lambda p: str(p.relative_to(base)),
     )
 
@@ -211,6 +248,152 @@ def split_font_runs(text: str, ascii_font: str, cjk_font: str) -> list[tuple[str
     return runs
 
 
+def text_width_mixed(text: str, font_ascii: str, font_cjk: str, font_size: int) -> float:
+    return sum(
+        pdfmetrics.stringWidth(run_text, run_font, font_size)
+        for run_text, run_font in split_font_runs(text, font_ascii, font_cjk)
+    )
+
+
+def draw_mixed_text(
+    canv: canvas.Canvas,
+    x: float,
+    y: float,
+    text: str,
+    font_ascii: str,
+    font_cjk: str,
+    font_size: int,
+):
+    for run_text, run_font in split_font_runs(text, font_ascii, font_cjk):
+        canv.setFont(run_font, font_size)
+        canv.drawString(x, y, run_text)
+        x += pdfmetrics.stringWidth(run_text, run_font, font_size)
+
+
+def classify_language(path: Path) -> Optional[str]:
+    ext = path.suffix.lower()
+    if ext in HEADER_EXTS:
+        return "C/C++ Header"
+    if path.name in LANGUAGE_MAP:
+        return LANGUAGE_MAP[path.name]
+    return LANGUAGE_MAP.get(ext)
+
+
+COMMENT_PREFIX = {
+    "Python": ("#",),
+    "C": ("//", "/*", "*", "*/"),
+    "C++": ("//", "/*", "*", "*/"),
+    "CUDA": ("//", "/*", "*", "*/"),
+    "C/C++ Header": ("//", "/*", "*", "*/"),
+    "JavaScript": ("//", "/*", "*", "*/"),
+    "HTML": ("<!--",),
+    "CSS": ("/*", "*", "*/"),
+    "QML": ("//", "/*", "*", "*/"),
+}
+
+
+def _count_file(f: Path) -> Optional[tuple[str, dict]]:
+    lang = classify_language(f)
+    if not lang:
+        return None
+    res = {"files": 1, "blank": 0, "comment": 0, "code": 0}
+    prefixes = COMMENT_PREFIX.get(lang, ("#", "//"))
+    with f.open("r", encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            stripped = line.strip()
+            if not stripped:
+                res["blank"] += 1
+            elif any(stripped.startswith(pfx) for pfx in prefixes):
+                res["comment"] += 1
+            else:
+                res["code"] += 1
+    return lang, res
+
+
+def compute_code_stats(files: List[Path], workers: int) -> list[dict]:
+    stats = defaultdict(lambda: {"files": 0, "blank": 0, "comment": 0, "code": 0})
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for result in ex.map(_count_file, files):
+            if not result:
+                continue
+            lang, res = result
+            for k, v in res.items():
+                stats[lang][k] += v
+    rows = []
+    for lang in sorted(stats.keys()):
+        rows.append({"lang": lang, **stats[lang]})
+    return rows
+
+
+def draw_stats_page(
+    canv: canvas.Canvas,
+    rows: list[dict],
+    page_width: float,
+    page_height: float,
+    margin_left: float = 40.0,
+    margin_top: float = 50.0,
+    font_ascii: str = "Courier",
+    font_size: int = 12,
+):
+    line_height = font_size * 1.4
+    y = page_height - margin_top
+    canv.setFont(font_ascii, font_size + 4)
+    canv.setFillColor(colors.darkblue)
+    canv.drawString(margin_left, y, "Code Statistics")
+    y -= line_height * 1.5
+    canv.setFont(font_ascii, font_size)
+    canv.setFillColor(colors.black)
+
+    # Build table text
+    headers = ("Language", "files", "blank", "comment", "code")
+    data_rows = []
+    total = {"files": 0, "blank": 0, "comment": 0, "code": 0}
+    for r in rows:
+        data_rows.append(
+            (
+                r["lang"],
+                str(r["files"]),
+                str(r["blank"]),
+                str(r["comment"]),
+                str(r["code"]),
+            )
+        )
+        for k in total:
+            total[k] += r[k]
+    # Column widths
+    cols = list(zip(*([headers] + data_rows + [("SUM:", str(total["files"]), str(total["blank"]), str(total["comment"]), str(total["code"]))])))
+    widths = [max(len(str(cell)) for cell in col) + 2 for col in cols]
+
+    def fmt_row(row):
+        return (
+            f"{row[0]:<{widths[0]}}"
+            f"{row[1]:>{widths[1]}}"
+            f"{row[2]:>{widths[2]}}"
+            f"{row[3]:>{widths[3]}}"
+            f"{row[4]:>{widths[4]}}"
+        )
+
+    divider = "-" * (sum(widths))
+    # Header
+    canv.drawString(margin_left, y, fmt_row(headers))
+    y -= line_height
+    canv.drawString(margin_left, y, divider)
+    y -= line_height
+    # Body
+    for row in data_rows:
+        canv.drawString(margin_left, y, fmt_row(row))
+        y -= line_height
+        if y < line_height * 2:
+            canv.showPage()
+            canv.setFont(font_ascii, font_size)
+            canv.setFillColor(colors.black)
+            y = page_height - margin_top
+    canv.drawString(margin_left, y, divider)
+    y -= line_height
+    sum_row = ("SUM:", str(total["files"]), str(total["blank"]), str(total["comment"]), str(total["code"]))
+    canv.drawString(margin_left, y, fmt_row(sum_row))
+    canv.drawString(margin_left, y - line_height, divider)
+
 def measure_pages_for_file(
     file_path: Path,
     page_width: float,
@@ -223,11 +406,19 @@ def measure_pages_for_file(
     font_cjk: str,
     font_size: int,
     show_line_numbers: bool = True,
+    tokens: Optional[list] = None,
+    total_lines: Optional[int] = None,
 ) -> int:
     """Estimate how many pages the file will consume with current layout."""
 
-    text = file_path.read_text(encoding="utf-8", errors="replace")
-    total_lines = text.count("\n") + 1
+    if tokens is None:
+        text = file_path.read_text(encoding="utf-8", errors="replace")
+        total_lines = text.count("\n") + 1
+        lexer = get_lexer_for_filename(file_path.name, stripall=False)
+        tokens = list(lexer.get_tokens(text))
+    else:
+        if total_lines is None:
+            raise ValueError("total_lines required when tokens are provided")
 
     line_height = font_size * 1.4
     digits = max(3, len(str(total_lines)))
@@ -238,12 +429,11 @@ def measure_pages_for_file(
     )
     text_width_limit = page_width - margin_left - margin_right - gutter_width
 
-    lexer = get_lexer_for_filename(file_path.name, stripall=False)
     y = page_height - margin_top - (line_height * 1.5)
     pages = 1
     x = margin_left + (gutter_width if show_line_numbers else 0)
 
-    for token_type, token_value in lexer.get_tokens(text):
+    for token_type, token_value in tokens:
         segments = token_value.split("\n")
         for seg_idx, segment in enumerate(segments):
             if segment:
@@ -340,10 +530,10 @@ def draw_toc(
 
     canv.setFont(font_cjk, font_size + 4)
     canv.setFillColor(colors.darkblue)
-    canv.drawString(margin_left, y, "目录")
+    draw_mixed_text(canv, margin_left, y, "Contents", font_ascii, font_cjk, font_size + 4)
     draw_footer(global_page_start)
     y -= line_height * 1.5
-    canv.setFont(font_ascii, font_size)
+    canv.setFont(font_cjk, font_size)
     page_idx = global_page_start
 
     first_entry = True
@@ -359,17 +549,17 @@ def draw_toc(
             canv.setFont(font_cjk, font_size + 4)
             canv.setFillColor(colors.darkblue)
             y = page_height - margin_top - (line_height * 0.5)
-            canv.drawString(margin_left, y, "目录")
+            draw_mixed_text(canv, margin_left, y, "Contents", font_ascii, font_cjk, font_size + 4)
             draw_footer(page_idx)
             y -= line_height * 1.5
-            canv.setFont(font_ascii, font_size)
+            canv.setFont(font_cjk, font_size)
 
         if is_header and not first_entry:
             y -= line_height * 0.4  # extra gap before a new group header
 
-        canv.setFillColor(colors.black)
-        canv.setFont(font_cjk if not is_header else font_cjk, font_size + (2 if is_header else 0))
-        canv.drawString(margin_left, y, name)
+        canv.setFillColor(colors.darkblue if is_header else colors.black)
+        name_size = font_size + (2 if is_header else 0)
+        draw_mixed_text(canv, margin_left, y, name, font_ascii, font_cjk, name_size)
         if not is_header:
             # Bookmark for linking back from file header to this entry
             if toc_dest:
@@ -379,7 +569,7 @@ def draw_toc(
             canv.setFont(font_ascii, font_size)
             canv.drawString(page_width - margin_right - pg_width, y, pg_text)
             # Clickable area for hyperlink.
-            name_width = pdfmetrics.stringWidth(name, font_cjk, font_size)
+            name_width = text_width_mixed(name, font_ascii, font_cjk, name_size)
             canv.linkAbsolute(
                 "",
                 dest,
@@ -467,14 +657,23 @@ def draw_highlighted_file(
     global_total_pages: int = 1,
     dest_name: Optional[str] = None,
     toc_link: Optional[str] = None,
+    pre_tokens: Optional[list] = None,
+    total_lines: Optional[int] = None,
 ):
     """Render one file on the current page of the canvas.
 
     Returns how many pages were consumed for this file.
     """
 
-    text = file_path.read_text(encoding="utf-8", errors="replace")
-    total_lines = text.count("\n") + 1
+    if pre_tokens is None:
+        text = file_path.read_text(encoding="utf-8", errors="replace")
+        total_lines = text.count("\n") + 1
+        lexer = get_lexer_for_filename(file_path.name, stripall=False)
+        tokens_seq = list(lexer.get_tokens(text))
+    else:
+        tokens_seq = pre_tokens
+        if total_lines is None:
+            raise ValueError("total_lines required when pre_tokens is provided")
 
     line_height = font_size * 1.4
     digits = max(3, len(str(total_lines)))
@@ -550,7 +749,6 @@ def draw_highlighted_file(
     if dest_name:
         canv.bookmarkPage(dest_name)
 
-    lexer = get_lexer_for_filename(file_path.name, stripall=False)
     line_no = 1
     x = margin_left
 
@@ -574,7 +772,7 @@ def draw_highlighted_file(
 
     start_line(line_no)
 
-    for token_type, token_value in lexer.get_tokens(text):
+    for token_type, token_value in tokens_seq:
         col = token_color(style, token_type)
         canv.setFillColor(col)
 
@@ -635,6 +833,7 @@ def build_pdf(
     split_files: bool = False,
     extra_excludes: Optional[set[str]] = None,
     toc_mode: str = "auto",
+    workers: Optional[int] = None,
 ) -> Path:
     files = filter_code_files(load_gitignored_files(project_dir, extra_excludes), project_dir)
     if not files:
@@ -652,27 +851,61 @@ def build_pdf(
     page_width, page_height = A4
     style = get_style_by_name(STYLE_NAME)
 
-    file_page_counts = []
+    worker_count = workers if workers and workers > 0 else max(1, min(32, (os.cpu_count() or 4) * 2))
+
+    # Stats page (not counted in global page numbers)
+    stats_rows = compute_code_stats(files, worker_count)
+    if stats_rows:
+        draw_stats_page(
+            canv,
+            stats_rows,
+            page_width,
+            page_height,
+            font_ascii=font_ascii,
+        )
+        canv.showPage()
+
     dest_names = []
     toc_dest_names = []
-    for fp in files:
-        rel = fp.relative_to(project_dir)
-        dest_names.append(f"dest_{rel.as_posix().replace('/', '_')}")
-        toc_dest_names.append(f"toc_{rel.as_posix().replace('/', '_')}")
-        file_page_counts.append(
-            measure_pages_for_file(
-                fp,
-                page_width,
-                page_height,
-                36.0,
-                20.0,
-                36.0,
-                36.0,
-                font_ascii,
-                font_cjk,
-                9,
-            )
+    prepared = []
+    def prep_file(f: Path):
+        rel = f.relative_to(project_dir)
+        dest = f"dest_{rel.as_posix().replace('/', '_')}"
+        toc_dest = f"toc_{rel.as_posix().replace('/', '_')}"
+        text = f.read_text(encoding="utf-8", errors="replace")
+        total_lines = text.count("\n") + 1
+        lexer = get_lexer_for_filename(f.name, stripall=False)
+        tokens_seq = list(lexer.get_tokens(text))
+        pages = measure_pages_for_file(
+            f,
+            page_width,
+            page_height,
+            36.0,
+            20.0,
+            36.0,
+            36.0,
+            font_ascii,
+            font_cjk,
+            9,
+            tokens=tokens_seq,
+            total_lines=total_lines,
         )
+        return {
+            "path": f,
+            "rel": rel,
+            "dest": dest,
+            "toc_dest": toc_dest,
+            "tokens": tokens_seq,
+            "total_lines": total_lines,
+            "pages": pages,
+        }
+
+    with ThreadPoolExecutor(max_workers=worker_count) as ex:
+        prepared = list(ex.map(prep_file, files))
+
+    dest_names = [item["dest"] for item in prepared]
+    toc_dest_names = [item["toc_dest"] for item in prepared]
+    file_page_counts = [item["pages"] for item in prepared]
     temp_entries = build_toc_entries(
         files,
         project_dir,
@@ -681,6 +914,7 @@ def build_pdf(
         [0] * len(files),
         mode=toc_mode,
     )
+    toc_font_size = 12
     toc_pages = measure_toc_pages(
         temp_entries,
         page_width,
@@ -690,7 +924,7 @@ def build_pdf(
         36.0,
         36.0,
         font_ascii,
-        9,
+        toc_font_size,
     )
     total_pages = toc_pages + sum(file_page_counts)
 
@@ -703,7 +937,7 @@ def build_pdf(
 
     # Render TOC
     toc_entries = build_toc_entries(
-        files,
+        [p["path"] for p in prepared],
         project_dir,
         dest_names,
         toc_dest_names,
@@ -721,15 +955,16 @@ def build_pdf(
         36.0,
         font_ascii,
         font_cjk,
-        9,
+        toc_font_size,
         global_page_start=1,
         global_total_pages=total_pages,
     )
     global_page_start = toc_pages + 1
 
-    for idx, file_path in enumerate(files):
+    for idx, item in enumerate(prepared):
         canv.showPage()
-        rel_path = file_path.relative_to(project_dir)
+        file_path = item["path"]
+        rel_path = item["rel"]
         draw_highlighted_file(
             canv,
             style,
@@ -748,6 +983,8 @@ def build_pdf(
             global_total_pages=total_pages,
             dest_name=dest_names[idx],
             toc_link=toc_dest_names[idx],
+            pre_tokens=item["tokens"],
+            total_lines=item["total_lines"],
         )
         global_page_start += file_page_counts[idx]
         if split_files:
@@ -771,6 +1008,8 @@ def build_pdf(
                 global_total_pages=file_page_counts[idx],
                 dest_name=dest_names[idx],
                 toc_link=None,
+                pre_tokens=item["tokens"],
+                total_lines=item["total_lines"],
             )
             single_canvas.save()
 
@@ -809,6 +1048,12 @@ def parse_args():
         default="auto",
         help="TOC layout: auto (default), flat list, or grouped by top-level directory.",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=0,
+        help="Worker threads for preprocessing (0 = auto).",
+    )
     return parser.parse_args()
 
 
@@ -818,6 +1063,7 @@ def main():
     output_dir: Path = args.output_dir.expanduser().resolve()
     font_file: Optional[Path] = args.font.expanduser().resolve() if args.font else None
     cjk_font_file: Optional[Path] = args.cjk_font.expanduser().resolve() if args.cjk_font else None
+    worker_override: Optional[int] = args.workers if args.workers and args.workers > 0 else None
 
     if not project_dir.exists() or not project_dir.is_dir():
         raise SystemExit(f"Project path not found or not a directory: {project_dir}")
@@ -830,6 +1076,7 @@ def main():
         split_files=args.split_files,
         extra_excludes=set(args.exclude_dir),
         toc_mode=args.toc_mode,
+        workers=worker_override,
     )
     print(f"PDF written to: {pdf_path}")
 
